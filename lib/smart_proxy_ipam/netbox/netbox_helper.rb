@@ -34,11 +34,11 @@ module NetboxHelper
 
   def provider
     @provider ||= begin
-                    metbox_client = NetboxClient.new
-                    unless metbox_client.authenticated?
+                    netbox_client = NetboxClient.new
+                    unless netbox_client.authenticated?
                       halt 500, {error: 'Invalid username and password for External IPAM'}.to_json
                     end
-                    metbox_client
+                    netbox_client
                   end
   end
 
