@@ -29,41 +29,15 @@ module Proxy::Netbox
       authenticate
     end
 
-    def get_subnet(cidr, section_name = nil)
-      if section_name.nil? || section_name.empty?
-        get_subnet_by_cidr(cidr)
-      else
-        get_subnet_by_section(cidr, section_name)
-      end
-    end
-
-    def get_subnet_by_section(cidr, section_name, include_id = true)
-      section = get_section(section_name)
-      # TODO: raise exception?
-      return {:error => "No section #{section_name} found"} unless section
-
-      subnets = get_subnets(section['id'], include_id)
-
-      subnet = subnets['data'].find { |subnet| "#{subnet['subnet']}/#{subnet['mask']}" == cidr }
-      return nil unless subnet
-
-      response = get("subnets/#{subnet_id.to_s}/")
+    def get_subnet(cidr)
+      response = get("/ipam/prefixes/?status=active&prefix=#{cidr}")
       return nil if response.code == 404
 
       json_body = JSON.parse(response.body)
-      json_body['data'] = filter_hash(json_body['data'], [:id, :subnet, :mask, :description]) if json_body['data']
-      filter_hash(json_body, [:data, :error, :message])
-    end
+      return nil if json_body['count'] == 0
 
-    def get_subnet_by_cidr(cidr)
-      response = get("/ipam/prefixes/#{cidr}")
-      return nil if response.code == 404
-
-      json_body = JSON.parse(response.body)
-      return nil if json_body['data'].nil?
-
-      json_body['data'] = filter_fields(json_body, [:id, :subnet, :description, :mask])[0]
-      filter_hash(json_body, [:data, :error, :message])
+      json_body['results'] = filter_fields(json_body, [:id, :prefix, :description,])[0]
+      filter_hash(json_body, [:results, :error, :message])
     end
 
     def get_section(section_name)
