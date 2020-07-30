@@ -295,6 +295,7 @@ module Proxy::Netbox
 
     def get(path)
       uri = URI(@api_base + path)
+      logger.debug("netbox post " + uri.to_s )
       request = Net::HTTP::Get.new(uri)
       request['Authorization'] = 'Token' + @conf[:token]
       request['Accept'] = 'application/json'
@@ -307,6 +308,7 @@ module Proxy::Netbox
     def delete(path, body = nil)
       uri = URI(@api_base + path)
       uri.query = URI.encode_www_form(body) if body
+      logger.debug("netbox post " + uri.to_s )
       request = Net::HTTP::Delete.new(uri)
       request['Authorization'] = 'Token' + @conf[:token]
       request['Accept'] = 'application/json'
@@ -319,6 +321,7 @@ module Proxy::Netbox
     def post(path, body = nil)
       uri = URI(@api_base + path)
       uri.query = URI.encode_www_form(body) if body
+      logger.debug("netbox post " + query.to_s )
       request = Net::HTTP::Post.new(uri)
       request['Authorization'] = 'Token' + @conf[:token]
       request['Accept'] = 'application/json'
