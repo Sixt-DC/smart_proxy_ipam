@@ -4,6 +4,8 @@ require 'smart_proxy_ipam/ipam_main'
 require 'smart_proxy_ipam/netbox/netbox_client'
 require 'smart_proxy_ipam/netbox/netbox_helper'
 
+# TODO: Refactor later to handle multiple IPAM providers. For now, it is
+# just phpIPAM that is supported
 module Proxy::Netbox
   class Api < ::Sinatra::Base
     include ::Proxy::Log
@@ -16,40 +18,31 @@ module Proxy::Netbox
     #           prefix:    Network prefix(e.g. 24)
     #
     # Returns: Hash with next available IP address in "data", or hash with "message" containing
-    #          error message from NetBox.
+    #          error message from phpIPAM.
     #
     # Response if success:
     #   {"code": 200, "success": true, "data": "100.55.55.3", "time": 0.012}
     get '/subnet/:address/:prefix/next_ip' do
       content_type :json
 
-      begin
-        err = validate_required_params(%w[address prefix mac], params)
-        return err if err.length > 0
+      validate_required_params!([:address, :prefix, :mac], params)
+      cidr = validate_cidr!(params[:address], params[:prefix])
 
+      begin
         mac = params[:mac]
-        cidr = params[:address] + '/' + params[:prefix]
         section_name = params[:group]
 
-        netbox_client = NetboxClient.new
+        subnet = provider.get_subnet(cidr, section_name)
+        check_subnet_exists!(subnet)
 
-        subnet = JSON.parse(netbox_client.get_subnet(cidr, section_name))
-
-        return { error: subnet['error'] }.to_json if no_subnets_found?(subnet)
-
-        ipaddr = netbox_client.get_next_ip(subnet['data']['id'], mac, cidr, section_name)
-        ipaddr_parsed = JSON.parse(ipaddr)
-
-        return { error: ipaddr_parsed['error'] }.to_json if no_free_ip_found?(ipaddr_parsed)
-
-        ipaddr
+        provider.get_next_ip(subnet['data']['id'], mac, cidr, section_name).to_json
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET
         logger.debug(errors[:no_connection])
         raise
       end
     end
 
-    # Gets the subnet from NetBox
+    # Gets the subnet from phpIPAM
     #
     # Inputs:   address:   Network address of the subnet
     #           prefix:    Network prefix(e.g. 24)
@@ -74,19 +67,18 @@ module Proxy::Netbox
     get '/subnet/:address/:prefix' do
       content_type :json
 
-      begin
-        err = validate_required_params(%w[address prefix], params)
-        return err if err.length > 0
+      validate_required_params!([:address, :prefix], params)
+      cidr = validate_cidr!(params[:address], params[:prefix])
 
-        cidr = params[:address] + '/' + params[:prefix]
+      subnet = begin
+                 provider.get_subnet(cidr)
+               rescue Errno::ECONNREFUSED, Errno::ECONNRESET
+                 logger.debug(errors[:no_connection])
+                 raise
+               end
 
-        netbox_client = NetboxClient.new
-
-        netbox_client.get_subnet(cidr)
-      rescue Errno::ECONNREFUSED, Errno::ECONNRESET
-        logger.debug(errors[:no_connection])
-        raise
-      end
+      status 404 unless subnet
+      subnet.to_json
     end
 
     # Get a list of sections from external ipam
@@ -100,15 +92,13 @@ module Proxy::Netbox
     #      "editDate":"2019-04-19 21:49:55","showVLAN":"1","showVRF":"1","showSupernetOnly":"1","DNS":null}]
     #   ]
     #   Response if :error =>
-    #     {"error":"Unable to connect to NetBox server"}
+    #     {"error":"Unable to connect to phpIPAM server"}
     get '/groups' do
       content_type :json
 
       begin
-        netbox_client = NetboxClient.new
-
-        sections = netbox_client.get_sections
-        return { data: [] }.to_json if no_sections_found?(JSON.parse(sections))
+        sections = provider.get_sections
+        return {:data => []}.to_json unless sections
 
         sections
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET
@@ -129,20 +119,16 @@ module Proxy::Netbox
     #   Response if not found:
     #     {"code":404,"error":"Not Found"}
     #   Response if :error =>
-    #     {"error":"Unable to connect to NetBox server"}
+    #     {"error":"Unable to connect to phpIPAM server"}
     get '/groups/:group' do
       content_type :json
 
+      validate_required_params!([:group], params)
+
       begin
-        err = validate_required_params(['group'], params)
-        return err if err.length > 0
-
-        netbox_client = NetboxClient.new
-
-        section = JSON.parse(netbox_client.get_section(params[:group]))
-        return {}.to_json if no_section_found?(section)
-
-        section['data'].to_json
+        section = provider.get_section(params[:group])
+        status 404 unless section
+        section.to_json
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET
         logger.debug(errors[:no_connection])
         raise
@@ -207,16 +193,13 @@ module Proxy::Netbox
     get '/groups/:group/subnets' do
       content_type :json
 
+      validate_required_params!([:group], params)
+
       begin
-        err = validate_required_params(['group'], params)
-        return err if err.length > 0
+        section = provider.get_section(params[:group])
+        halt 404, {:error => errors[:no_section]}.to_json unless section
 
-        netbox_client = NetboxClient.new
-
-        section = JSON.parse(netbox_client.get_section(params[:group]))
-        return { error: errors[:no_section] }.to_json if no_section_found?(section)
-
-        netbox_client.get_subnets(section['data']['id'].to_s, false)
+        provider.get_subnets(section['id'].to_s, false).to_json
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET
         logger.debug(errors[:no_connection])
         raise
@@ -239,31 +222,26 @@ module Proxy::Netbox
     get '/subnet/:address/:prefix/:ip' do
       content_type :json
 
-      begin
-        err = validate_required_params(%w[address prefix ip], params)
-        return err if err.length > 0
+      validate_required_params!([:address, :prefix, :ip], params)
+      ip = validate_ip!(params[:ip])
+      cidr = validate_cidr!(params[:address], params[:prefix])
+      validate_ip_in_cidr!(ip, cidr)
 
-        ip = params[:ip]
-        cidr = params[:address] + '/' + params[:prefix]
+      begin
         section_name = params[:group]
 
-        netbox_client = NetboxClient.new
+        subnet = provider.get_subnet(cidr, section_name)
+        check_subnet_exists!(subnet)
 
-        subnet = JSON.parse(netbox_client.get_subnet(cidr, section_name))
-        return { error: subnet['error'] }.to_json if no_subnets_found?(subnet)
-
-        response = netbox_client.ip_exists(ip, subnet['data']['id'])
-        ip_exists = JSON.parse(response.body)
-
-        if ip_exists['data']
-          return Net::HTTPFound.new('HTTP/1.1', 200, 'Found').to_json
-        else
-          return Net::HTTPNotFound.new('HTTP/1.1', 404, 'Not Found').to_json
+        unless provider.ip_exists?(ip, subnet['data']['id'])
+          halt 404, {error: "IP #{ip} was not found in subnet #{cidr}"}.to_json
         end
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET
         logger.debug(errors[:no_connection])
         raise
       end
+
+      {ip: ip}.to_json
     end
 
     # Adds an IP address to the specified subnet
@@ -279,35 +257,30 @@ module Proxy::Netbox
     #     IPv4: {"message":"IP 100.10.10.123 added to subnet 100.10.10.0/24 successfully."}
     #     IPv6: {"message":"IP 2001:db8:abcd:12::3 added to subnet 2001:db8:abcd:12::/124 successfully."}
     #   Response if :error =>
-    #     {"error":"The specified subnet does not exist in NetBox."}
+    #     {"error":"The specified subnet does not exist in phpIPAM."}
     post '/subnet/:address/:prefix/:ip' do
       content_type :json
 
+      validate_required_params!([:address, :ip, :prefix], params)
+      ip = validate_ip!(params[:ip])
+      cidr = validate_cidr!(params[:address], params[:prefix])
+      validate_ip_in_cidr!(ip, cidr)
+
       begin
-        err = validate_required_params(%w[address ip prefix], params)
-        return err if err.length > 0
+        section_name = params[:group]
 
-        ip = params[:ip]
-        cidr = params[:address] + '/' + params[:prefix]
-        section_name = URI.escape(params[:group])
+        subnet = provider.get_subnet(cidr, section_name)
+        check_subnet_exists!(subnet)
 
-        netbox_client = NetboxClient.new
-
-        subnet = JSON.parse(netbox_client.get_subnet(cidr, section_name))
-        return { error: subnet['error'] }.to_json if no_subnets_found?(subnet)
-
-        response = netbox_client.add_ip_to_subnet(ip, subnet['data']['id'], 'Address auto added by Foreman')
-        add_ip = JSON.parse(response.body)
-
-        if add_ip['message'] && add_ip['message'] == 'Address created'
-          return Net::HTTPCreated.new('HTTP/1.1', 201, 'Created').to_json
-        else
-          return { error: add_ip['message'] }.to_json
-        end
+        add_ip = provider.add_ip_to_subnet(ip, subnet['data']['id'], 'Address auto added by Foreman')
+        halt 500, add_ip.to_json if add_ip
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET
         logger.debug(errors[:no_connection])
         raise
       end
+
+      status 201
+      {ip: ip}.to_json
     end
 
     # Deletes IP address from a given subnet
@@ -319,36 +292,32 @@ module Proxy::Netbox
     # Returns: JSON object
     # Example:
     #   Response if success:
-    #     {"code": 200, "success": true, "message": "Address deleted", "time": 0.017}
+    #     HTTP 204 No Content
     #   Response if :error =>
     #     {"code": 404, "success": 0, "message": "Address does not exist", "time": 0.008}
     delete '/subnet/:address/:prefix/:ip' do
       content_type :json
 
+      validate_required_params!([:address, :prefix, :ip], params)
+      ip = validate_ip!(params[:ip])
+      cidr = validate_cidr!(params[:address], params[:prefix])
+      validate_ip_in_cidr!(ip, cidr)
+
       begin
-        err = validate_required_params(%w[address prefix ip], params)
-        return err if err.length > 0
+        section_name = params[:group]
 
-        ip = params[:ip]
-        cidr = params[:address] + '/' + params[:prefix]
-        section_name = URI.escape(params[:group])
-        netbox_client = NetboxClient.new
+        subnet = provider.get_subnet(cidr, section_name)
+        check_subnet_exists!(subnet)
 
-        subnet = JSON.parse(netbox_client.get_subnet(cidr, section_name))
-        return { error: subnet['error'] }.to_json if no_subnets_found?(subnet)
-
-        response = netbox_client.delete_ip_from_subnet(ip, subnet['data']['id'])
-        delete_ip = JSON.parse(response.body)
-
-        if delete_ip['message'] && delete_ip['message'] == 'Address deleted'
-          return Net::HTTPOK.new('HTTP/1.1', 200, 'Address Deleted').to_json
-        else
-          return { error: delete_ip['message'] }.to_json
-        end
+        delete_ip = provider.delete_ip_from_subnet(ip, subnet['data']['id'])
+        halt 500, delete_ip.to_json if delete_ip
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET
         logger.debug(errors[:no_connection])
         raise
       end
+
+      status 204
+      nil
     end
 
     # Checks whether a subnet exists in a specific section.
@@ -367,19 +336,18 @@ module Proxy::Netbox
     get '/group/:group/subnet/:address/:prefix' do
       content_type :json
 
-      begin
-        err = validate_required_params(%w[address prefix group], params)
-        return err if err.length > 0
+      validate_required_params!([:address, :prefix, :group], params)
+      cidr = validate_cidr!(params[:address], params[:prefix])
 
-        cidr = params[:address] + '/' + params[:prefix]
+      subnet = begin
+                 provider.get_subnet_by_section(cidr, params[:group])
+               rescue Errno::ECONNREFUSED, Errno::ECONNRESET
+                 logger.debug(errors[:no_connection])
+                 raise
+               end
 
-        netbox_client = NetboxClient.new
-
-        netbox_client.get_subnet_by_section(cidr, params[:group])
-      rescue Errno::ECONNREFUSED, Errno::ECONNRESET
-        logger.debug(errors[:no_connection])
-        raise
-      end
+      status 404 unless subnet
+      subnet.to_json
     end
   end
 end
