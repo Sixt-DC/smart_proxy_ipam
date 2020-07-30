@@ -56,7 +56,7 @@ module Proxy::Netbox
     end
 
     def get_subnet_by_cidr(cidr)
-      response = get("subnets/cidr/#{cidr}")
+      response = get("/ipam/prefixes/#{cidr}")
       return nil if response.code == 404
 
       json_body = JSON.parse(response.body)
@@ -297,7 +297,7 @@ module Proxy::Netbox
       uri = URI(@api_base + path)
       logger.debug("netbox post " + uri.to_s )
       request = Net::HTTP::Get.new(uri)
-      request['Authorization'] = 'Token' + @conf[:token]
+      request['Authorization'] = 'Token ' + @conf[:token]
       request['Accept'] = 'application/json'
 
       Net::HTTP.start(uri.hostname, uri.port) do |http|
@@ -310,7 +310,7 @@ module Proxy::Netbox
       uri.query = URI.encode_www_form(body) if body
       logger.debug("netbox post " + uri.to_s )
       request = Net::HTTP::Delete.new(uri)
-      request['Authorization'] = 'Token' + @conf[:token]
+      request['Authorization'] = 'Token ' + @conf[:token]
       request['Accept'] = 'application/json'
 
       Net::HTTP.start(uri.hostname, uri.port) do |http|
@@ -323,7 +323,7 @@ module Proxy::Netbox
       uri.query = URI.encode_www_form(body) if body
       logger.debug("netbox post " + query.to_s )
       request = Net::HTTP::Post.new(uri)
-      request['Authorization'] = 'Token' + @conf[:token]
+      request['Authorization'] = 'Token ' + @conf[:token]
       request['Accept'] = 'application/json'
       request['Content-Type'] = 'application/json'
 
