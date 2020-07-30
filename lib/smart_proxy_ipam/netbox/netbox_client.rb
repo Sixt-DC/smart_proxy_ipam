@@ -21,8 +21,8 @@ module Proxy::Netbox
 
     def initialize
       @conf = Proxy::Ipam.get_config[:netbox]
-      @api_base = "#{@conf[:url]}/api/#{@conf[:user]}/"
-      @token = nil
+      @api_base = "#{@conf[:url]}/api/"
+      @conf[:token] = nil
       @@m = Monitor.new
       init_cache if @@ip_cache.nil?
       start_cleanup_task if @@timer_task.nil?
@@ -296,47 +296,37 @@ module Proxy::Netbox
     def get(path)
       uri = URI(@api_base + path)
       request = Net::HTTP::Get.new(uri)
-      request['token'] = @token
+      request['Authorization'] = 'Token' + @conf[:token]
+      request['Accept'] = 'application/json'
 
-      Net::HTTP.start(uri.hostname, uri.port) {|http|
+      Net::HTTP.start(uri.hostname, uri.port) do |http|
         http.request(request)
-      }
+      end
     end
 
-    def delete(path, body=nil)
+    def delete(path, body = nil)
       uri = URI(@api_base + path)
       uri.query = URI.encode_www_form(body) if body
       request = Net::HTTP::Delete.new(uri)
-      request['token'] = @token
+      request['Authorization'] = 'Token' + @conf[:token]
+      request['Accept'] = 'application/json'
 
-      Net::HTTP.start(uri.hostname, uri.port) {|http|
+      Net::HTTP.start(uri.hostname, uri.port) do |http|
         http.request(request)
-      }
+      end
     end
 
-    def post(path, body=nil)
+    def post(path, body = nil)
       uri = URI(@api_base + path)
       uri.query = URI.encode_www_form(body) if body
       request = Net::HTTP::Post.new(uri)
-      request['token'] = @token
+      request['Authorization'] = 'Token' + @conf[:token]
+      request['Accept'] = 'application/json'
+      request['Content-Type'] = 'application/json'
 
-      Net::HTTP.start(uri.hostname, uri.port) {|http|
+      Net::HTTP.start(uri.hostname, uri.port) do |http|
         http.request(request)
-      }
-    end
-
-    def authenticate
-      auth_uri = URI(@api_base + '/user/')
-      request = Net::HTTP::Post.new(auth_uri)
-      request.basic_auth @conf[:user], @conf[:password]
-
-      response = Net::HTTP.start(auth_uri.hostname, auth_uri.port) {|http|
-        http.request(request)
-      }
-
-      response = JSON.parse(response.body)
-      logger.warn(response['message']) if response['message']
-      @token = response.dig('data', 'token')
+      end
     end
   end
 end
