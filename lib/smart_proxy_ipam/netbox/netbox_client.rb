@@ -22,11 +22,9 @@ module Proxy::Netbox
     def initialize
       @conf = Proxy::Ipam.get_config[:netbox]
       @api_base = "#{@conf[:url]}/api/"
-      @conf[:token] = nil
       @@m = Monitor.new
       init_cache if @@ip_cache.nil?
       start_cleanup_task if @@timer_task.nil?
-      authenticate
     end
 
     def get_subnet(cidr)
@@ -143,10 +141,6 @@ module Proxy::Netbox
       logger.info("Starting allocated ip address maintenance (used by get_next_ip call).")
       @@timer_task = Concurrent::TimerTask.new(:execution_interval => DEFAULT_CLEANUP_INTERVAL) { init_cache }
       @@timer_task.execute
-    end
-
-    def authenticated?
-      !@token.nil?
     end
 
     private
