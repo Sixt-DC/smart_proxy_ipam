@@ -1,6 +1,11 @@
 module NetboxHelper
   def validate_required_params!(required_params, params)
-    err = required_params.select { |param| params[param] }.map { |param| errors[param] }
+    err = []
+    required_params.each do |param|
+      if not params[param.to_sym]
+        err.push errors[param.to_sym]
+      end
+    end
     halt 400, {error: err}.to_json unless err.empty?
   end
 
@@ -20,7 +25,7 @@ module NetboxHelper
     halt 400, {error: e.to_s}.to_json
   end
 
-  def validate_ip_in_cidr(ip, cidr)
+  def validate_ip_in_cidr!(ip, cidr)
     unless IPAddr.new(cidr).include?(IPAddr.new(ip))
       halt 400, {error: "IP #{ip} is not in #{cidr}"}.to_json
     end
@@ -32,16 +37,10 @@ module NetboxHelper
     end
   end
 
-  def provider
-    @provider ||= begin
-                    NetboxClient.new
-                  end
-  end
-
   # Returns an array of hashes with only the fields given in the fields param
   def filter_fields(json_body, fields)
     data = []
-    json_body['data'].each do |subnet|
+    json_body[''].each do |subnet|
       item = {}
       fields.each do |field| item[field.to_sym] = subnet[field.to_s] end
       data.push(item)

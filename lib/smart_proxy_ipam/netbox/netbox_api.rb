@@ -5,12 +5,18 @@ require 'smart_proxy_ipam/netbox/netbox_client'
 require 'smart_proxy_ipam/netbox/netbox_helper'
 
 # TODO: Refactor later to handle multiple IPAM providers. For now, it is
-# just phpIPAM that is supported
+# just NetBox that is supported
 module Proxy::Netbox
   class Api < ::Sinatra::Base
     include ::Proxy::Log
     helpers ::Proxy::Helpers
     helpers NetboxHelper
+
+    def provider
+      @provider ||= begin
+                     NetboxClient.new
+                    end
+    end
 
     # Gets the next available IP address based on a given subnet
     #
@@ -18,7 +24,7 @@ module Proxy::Netbox
     #           prefix:    Network prefix(e.g. 24)
     #
     # Returns: Hash with next available IP address in "data", or hash with "message" containing
-    #          error message from phpIPAM.
+    #          error message from NetBox.
     #
     # Response if success:
     #   {"code": 200, "success": true, "data": "100.55.55.3", "time": 0.012}
@@ -30,40 +36,34 @@ module Proxy::Netbox
 
       begin
         mac = params[:mac]
-        section_name = params[:group]
+        group = params[:group]
 
-        subnet = provider.get_subnet(cidr, section_name)
+        subnet = provider.get_subnet(cidr)
         check_subnet_exists!(subnet)
 
-        provider.get_next_ip(subnet['data']['id'], mac, cidr, section_name).to_json
+        provider.get_next_ip(subnet['data']['id'], mac, group, cidr).to_json
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET
         logger.debug(errors[:no_connection])
         raise
       end
     end
 
-    # Gets the subnet from phpIPAM
+
+    # Returns an array of subnets from External IPAM matching the given subnet.
     #
-    # Inputs:   address:   Network address of the subnet
-    #           prefix:    Network prefix(e.g. 24)
+    # Params:  1. subnet:           The IPv4 or IPv6 subnet CIDR. (Examples: IPv4 - "100.10.10.0/24",
+    #                               IPv6 - "2001:db8:abcd:12::/124")
+    #          2. group(optional):  The name of the External IPAM group containing the subnet.
     #
-    # Returns: JSON with "data" key on success, or JSON with "error" key when there is an error
+    # Returns: A subnet on success, or a hash with an "error" key on failure.
     #
-    # Examples:
-    #   Response if subnet exists:
-    #     {
-    #       "code":200,"success":true,"data":[{"id":"12","subnet":"100.30.30.0","mask":"24",
-    #       "sectionId":"5", "description":"Test Subnet","linked_subnet":null,"firewallAddressObject":null,
-    #       "vrfId":"0","masterSubnetId":"0","allowRequests":"0","vlanId":"0","showName":"0","device":"0",
-    #       "permissions":"[]","pingSubnet":"0","discoverSubnet":"0","DNSrecursive":"0","DNSrecords":"0",
-    #       "nameserverId":"0","scanAgent":"0","isFolder":"0","isFull":"0","tag":"2","threshold":"0",
-    #       "location":"0","editDate":null,"lastScan":null,"lastDiscovery":null}],"time":0.009
-    #     }
-    #
-    #   Response if subnet not exists):
-    #     {
-    #       "code":200,"success":0,"message":"No subnets found","time":0.01
-    #     }
+    # Responses from Proxy plugin:
+    #   Response if subnet(s) exists:
+    #     {"data": {"subnet": "44.44.44.0", "description": "", "mask":"29"}}
+    #   Response if subnet not exists:
+    #     {"error": "No subnets found"}
+    #   Response if can't connect to External IPAM server
+    #     {"error": "Unable to connect to External IPAM server"}
     get '/subnet/:address/:prefix' do
       content_type :json
 
@@ -81,58 +81,50 @@ module Proxy::Netbox
       subnet.to_json
     end
 
-    # Get a list of sections from external ipam
+    # Get a list of groups from External IPAM. A group is analagous to a 'section' in phpIPAM, and
+    # is a logical grouping of subnets/ips.
     #
-    # Input: None
-    # Returns: An array of sections on success, hash with "error" key otherwise
-    # Examples
-    #   Response if success: [
-    #     {"id":"5","name":"Awesome Section","description":"A totally awesome Section","masterSection":"0",
-    #      "permissions":"[]","strictMode":"1","subnetOrdering":"default","order":null,
-    #      "editDate":"2019-04-19 21:49:55","showVLAN":"1","showVRF":"1","showSupernetOnly":"1","DNS":null}]
-    #   ]
-    #   Response if :error =>
-    #     {"error":"Unable to connect to phpIPAM server"}
+    # Params: None
+    #
+    # Returns: An array of groups on success, or a hash with a "error" key
+    #          containing error on failure.
+    #
+    # Responses from Proxy plugin:
+    #   Response if success:
+    #     {"data": [
+    #       {name":"Test Group","description": "A Test Group"},
+    #       {name":"Awesome Group","description": "A totally awesome Group"}
+    #     ]}
+    #   Response if no groups exist:
+    #     {"data": []}
+    #   Response if groups are not supported:
+    #     {"error": "Groups are not supported"}
+    #   Response if can't connect to External IPAM server
+    #     {"error": "Unable to connect to External IPAM server"}
     get '/groups' do
       content_type :json
-
-      begin
-        sections = provider.get_sections
-        return {:data => []}.to_json unless sections
-
-        sections
-      rescue Errno::ECONNREFUSED, Errno::ECONNRESET
-        logger.debug(errors[:no_connection])
-        raise
-      end
+      return {:error => "Groups are not supported"}.to_json
     end
 
-    # Get a single section from external ipam
+    # Get a group from External IPAM. A group is analagous to a 'section' in phpIPAM, and
+    # is a logical grouping of subnets/ips.
     #
-    # Input: Section name
-    # Returns: A JSON section on success, hash with "error" key otherwise
-    # Examples
+    # Params: group: The name of the External IPAM group
+    #
+    # Returns: An External IPAM group on success, or a hash with an "error" key on failure.
+    #
+    # Responses from Proxy plugin:
     #   Response if success:
-    #     {"code":200,"success":true,"data":{"id":"80","name":"Development #1","description":null,
-    #      "masterSection":"0","permissions":"[]","strictMode":"1","subnetOrdering":"default","order":null,
-    #      "editDate":"2020-02-11 10:57:01","showVLAN":"1","showVRF":"1","showSupernetOnly":"1","DNS":null},"time":0.004}
-    #   Response if not found:
-    #     {"code":404,"error":"Not Found"}
-    #   Response if :error =>
-    #     {"error":"Unable to connect to phpIPAM server"}
+    #     {"data": {"name":"Awesome Section", "description": "Awesome Section"}}
+    #   Response if group doesn't exist:
+    #     {"error": "Not found"}
+    #   Response if groups are not supported:
+    #     {"error": "Groups are not supported"}
+    #   Response if can't connect to External IPAM server
+    #     {"error": "Unable to connect to External IPAM server"}
     get '/groups/:group' do
       content_type :json
-
-      validate_required_params!([:group], params)
-
-      begin
-        section = provider.get_section(params[:group])
-        status 404 unless section
-        section.to_json
-      rescue Errno::ECONNREFUSED, Errno::ECONNRESET
-        logger.debug(errors[:no_connection])
-        raise
-      end
+      return {:error => "Groups are not supported"}.to_json
     end
 
     # Get a list of subnets for given external ipam section/group
@@ -228,9 +220,7 @@ module Proxy::Netbox
       validate_ip_in_cidr!(ip, cidr)
 
       begin
-        section_name = params[:group]
-
-        subnet = provider.get_subnet(cidr, section_name)
+        subnet = provider.get_subnet(cidr)
         check_subnet_exists!(subnet)
 
         unless provider.ip_exists?(ip, subnet['data']['id'])
@@ -257,7 +247,7 @@ module Proxy::Netbox
     #     IPv4: {"message":"IP 100.10.10.123 added to subnet 100.10.10.0/24 successfully."}
     #     IPv6: {"message":"IP 2001:db8:abcd:12::3 added to subnet 2001:db8:abcd:12::/124 successfully."}
     #   Response if :error =>
-    #     {"error":"The specified subnet does not exist in phpIPAM."}
+    #     {"error":"The specified subnet does not exist in NetBox."}
     post '/subnet/:address/:prefix/:ip' do
       content_type :json
 
@@ -269,7 +259,7 @@ module Proxy::Netbox
       begin
         section_name = params[:group]
 
-        subnet = provider.get_subnet(cidr, section_name)
+        subnet = provider.get_subnet(cidr)
         check_subnet_exists!(subnet)
 
         add_ip = provider.add_ip_to_subnet(ip, subnet['data']['id'], 'Address auto added by Foreman')

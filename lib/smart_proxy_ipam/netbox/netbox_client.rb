@@ -28,40 +28,22 @@ module Proxy::Netbox
     end
 
     def get_subnet(cidr)
-      response = get("/ipam/prefixes/?status=active&prefix=#{cidr}")
-      return nil if response.code == 404
+      response = get("ipam/prefixes/?status=active&prefix=#{cidr}")
 
       json_body = JSON.parse(response.body)
-      return nil if json_body['count'] == 0
 
-      json_body['results'] = filter_fields(json_body, [:id, :prefix, :description,])[0]
-      filter_hash(json_body, [:results, :error, :message])
-    end
+      subnet = {}
+      if json_body['count'] == 0
+        subnet['error']='No subnets found'
+      else
+        subnet['data'] = {}
+        subnet['data']['subnet'] = json_body['results'][0]['prefix'].split('/').first
+        subnet['data']['mask'] = json_body['results'][0]['prefix'].split('/').last
+        subnet['data']['description'] = json_body['results'][0]['description']
+        subnet['data']['id'] = json_body['results'][0]['id']
+      end
 
-    def get_section(section_name)
-      response = get("sections/#{URI.escape(section_name)}/")
-      # TODO: check for non-200 codes
-      return nil if response.code == 404
-
-      json_body = JSON.parse(response.body)
-      # TODO is this redundant and is the HTTP 404 code reliable?
-      return nil if section['message'] && section['message'].downcase == "not found"
-      return nil unless json_body['data']
-
-      filter_hash(json_body['data'], [:id, :name, :description])
-    end
-
-    def get_sections
-      response = get('sections/')
-      return nil if response.code == 404
-
-      json_body = JSON.parse(response.body)
-      return nil unless json_body['data']
-      # TODO is this redundant and is the HTTP 404 code reliable?
-      return nil if sections['message'] && sections['message'].downcase == "no sections available"
-
-      json_body['data'] = filter_fields(json_body, [:id, :name, :description])
-      filter_hash(json_body, [:data, :error, :message])
+      subnet
     end
 
     def get_subnets(section_id, include_id = true)
@@ -75,12 +57,14 @@ module Proxy::Netbox
     end
 
     def ip_exists?(ip, subnet_id)
-      response = get("subnets/#{subnet_id}/addresses/#{ip}/")
-      return false if response.code == 404
-
+      response = get("ipam/ip-addresses/?address=#{ip}")
       json_body = JSON.parse(response.body)
-      return false if ip['message'] && ip['message'].downcase == 'no addresses found'
-      !json_body['data'].nil?
+
+      if json_body['count'] == 0
+        return false
+      else
+        return true
+      end
     end
 
     def add_ip_to_subnet(ip, subnet_id, desc)
@@ -100,20 +84,23 @@ module Proxy::Netbox
       filter_hash(json_body, [:error, :message])
     end
 
-    def get_next_ip(subnet_id, mac, cidr, section_name)
-      response = get("subnets/#{subnet_id.to_s}/first_free/")
+    def get_next_ip(subnet_id, mac, section_name, cidr)
+
+
+      response = get("ipam/prefixes/#{subnet_id}/available-ips/?limit=1")
       json_body = JSON.parse(response.body)
       section = section_name.nil? ? "" : section_name
       @@ip_cache[section.to_sym] = {} if @@ip_cache[section.to_sym].nil?
       subnet_hash = @@ip_cache[section.to_sym][cidr.to_sym]
 
-      return {:error => json_body['message']} if json_body['message']
+      return {:error => 'No subnets found'} if json_body.empty?
 
+      json_return = {}
       if subnet_hash && subnet_hash.key?(mac.to_sym)
-        json_body['data'] = @@ip_cache[section_name.to_sym][cidr.to_sym][mac.to_sym][:ip]
+        json_return['data'] = @@ip_cache[section_name.to_sym][cidr.to_sym][mac.to_sym][:ip]
       else
         next_ip = nil
-        new_ip = json_body['data']
+        new_ip = json_body[0]['address'].split('/').first
         ip_not_in_cache = subnet_hash.nil? ? true : !subnet_hash.to_s.include?(new_ip.to_s)
 
         if ip_not_in_cache
@@ -126,15 +113,15 @@ module Proxy::Netbox
         return {:error => "Unable to find another available IP address in subnet #{cidr}"} if next_ip.nil?
         return {:error => "It is possible that there are no more free addresses in subnet #{cidr}. Available IP's may be cached, and could become available after in-memory IP cache is cleared(up to #{DEFAULT_CLEANUP_INTERVAL} seconds)."} unless usable_ip(next_ip, cidr)
 
-        json_body['data'] = next_ip
+        json_return['data'] = next_ip
       end
 
       # TODO: Is there a better way to catch this?
-      if json_body['error'] && json_body['error'].downcase == "no free addresses found"
+      if json_return['error'] && json_return['error'].downcase == "no free addresses found"
         return {:error => json_body['error']}
       end
 
-      {:data => json_body['data']}
+      {:data => json_return['data']}
     end
 
     def start_cleanup_task
@@ -263,27 +250,31 @@ module Proxy::Netbox
 
     def get(path)
       uri = URI(@api_base + path)
-      logger.debug("netbox post " + uri.to_s )
+      logger.debug("netbox get " + uri.to_s )
       request = Net::HTTP::Get.new(uri)
       request['Authorization'] = 'Token ' + @conf[:token]
       request['Accept'] = 'application/json'
 
-      Net::HTTP.start(uri.hostname, uri.port) do |http|
+      response = Net::HTTP.start(uri.hostname, uri.port, :use_ssl => uri.scheme == 'https') do |http|
         http.request(request)
       end
+      raise "Netbox HTTP Error #{response.code}" unless response.code == "200"
+      response
     end
 
     def delete(path, body = nil)
       uri = URI(@api_base + path)
       uri.query = URI.encode_www_form(body) if body
-      logger.debug("netbox post " + uri.to_s )
+      logger.debug("netbox delete " + uri.to_s )
       request = Net::HTTP::Delete.new(uri)
       request['Authorization'] = 'Token ' + @conf[:token]
       request['Accept'] = 'application/json'
 
-      Net::HTTP.start(uri.hostname, uri.port) do |http|
+      response = Net::HTTP.start(uri.hostname, uri.port, :use_ssl => uri.scheme == 'https') do |http|
         http.request(request)
       end
+      raise "Netbox HTTP Error #{response.code}" unless response.code == "200"
+      response
     end
 
     def post(path, body = nil)
@@ -295,9 +286,11 @@ module Proxy::Netbox
       request['Accept'] = 'application/json'
       request['Content-Type'] = 'application/json'
 
-      Net::HTTP.start(uri.hostname, uri.port) do |http|
+      response = Net::HTTP.start(uri.hostname, uri.port, :use_ssl => uri.scheme == 'https') do |http|
         http.request(request)
       end
+      raise "Netbox HTTP Error #{response.code}" unless response.code == "200"
+      response
     end
   end
 end
