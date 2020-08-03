@@ -191,26 +191,33 @@ module Proxy::Netbox
         section = provider.get_section(params[:group])
         halt 404, {:error => errors[:no_section]}.to_json unless section
 
-        provider.get_subnets(section['id'].to_s, false).to_json
+        provider.get_subnets(section['id'].to_s).to_json
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET
         logger.debug(errors[:no_connection])
         raise
       end
     end
 
-    # Checks whether an IP address has already been taken in external ipam.
+    # Checks whether an IP address has already been reserved in External IPAM.
     #
-    # Params: 1. address:   The network address of the IPv4 or IPv6 subnet.
-    #         2. prefix:    The subnet prefix(e.g. 24)
-    #         3. ip:        IP address to be queried
+    # Inputs: 1. ip:               IP address to be checked
+    #         2. subnet:           The IPv4 or IPv6 subnet CIDR. (Examples: IPv4 - "100.10.10.0/24",
+    #                              IPv6 - "2001:db8:abcd:12::/124")
+    #         3. group(optional):  The name of the External IPAM group containing the subnet to pull IP from
     #
-    # Returns: JSON object with 'exists' field being either true or false
+    # Returns: true if IP exists in External IPAM, otherwise false.
     #
-    # Example:
-    #   Response if exists:
-    #     {"ip":"100.20.20.18","exists":true}
-    #   Response if not exists:
-    #     {"ip":"100.20.20.18","exists":false}
+    # Responses from Proxy plugin:
+    #   Response if IP is already reserved:
+    #     Net::HTTPFound
+    #   Response if IP address is available
+    #     Net::HTTPNotFound
+    #   Response if missing required parameters:
+    #     {"error": ["A 'cidr' parameter for the subnet must be provided(e.g. 100.10.10.0/24)", "Missing 'ip' parameter. An IPv4 address must be provided(e.g. 100.10.10.22)"]}
+    #   Response if subnet not exists:
+    #     {"error": "No subnets found"}
+    #   Response if can't connect to External IPAM server
+    #     {"error": "Unable to connect to External IPAM server"}
     get '/subnet/:address/:prefix/:ip' do
       content_type :json
 
@@ -223,31 +230,41 @@ module Proxy::Netbox
         subnet = provider.get_subnet(cidr)
         check_subnet_exists!(subnet)
 
-        unless provider.ip_exists?(ip, subnet['data']['id'])
-          halt 404, {error: "IP #{ip} was not found in subnet #{cidr}"}.to_json
+
+        if provider.ip_exists?(ip, subnet['data']['id'])
+          return Net::HTTPFound.new('HTTP/1.1', 200, 'Found').to_json
+        else
+          return Net::HTTPNotFound.new('HTTP/1.1', 404, 'Not Found').to_json
         end
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET
         logger.debug(errors[:no_connection])
         raise
       end
 
-      {ip: ip}.to_json
     end
 
-    # Adds an IP address to the specified subnet
+    # Adds an IP address to the specified subnet in External IPAM. This will reserve the IP in the
+    # External IPAM database. If group is specified, the IP will be added to the subnet within the
+    # given group.
     #
-    # Params: 1. address:   The network address of the IPv4 or IPv6 subnet.
-    #         2. prefix:    The subnet prefix(e.g. 24)
-    #         3. ip:        IP address to be added
+    # Params: 1. ip:               IP address to be added
+    #         2. subnet:           The IPv4 or IPv6 subnet CIDR. (Examples: IPv4 - "100.10.10.0/24",
+    #                              IPv6 - "2001:db8:abcd:12::/124")
+    #         3. group(optional):  The name of the External IPAM group containing the subnet.
     #
-    # Returns: Hash with "message" on success, or hash with "error"
+    # Returns: true if IP was added successfully to External IPAM, otherwise false
     #
-    # Examples:
+    # Responses from Proxy plugin:
     #   Response if success:
-    #     IPv4: {"message":"IP 100.10.10.123 added to subnet 100.10.10.0/24 successfully."}
-    #     IPv6: {"message":"IP 2001:db8:abcd:12::3 added to subnet 2001:db8:abcd:12::/124 successfully."}
-    #   Response if :error =>
-    #     {"error":"The specified subnet does not exist in NetBox."}
+    #     Net::HTTPCreated
+    #   Response if IP already reserved:
+    #     {"error": "IP address already exists"}
+    #   Response if subnet error:
+    #     {"error": "The specified subnet does not exist in External IPAM."}
+    #   Response if missing required params:
+    #     {"error": ["A 'cidr' parameter for the subnet must be provided(e.g. 100.10.10.0/24)","Missing 'ip' parameter. An IPv4 address must be provided(e.g. 100.10.10.22)"]}
+    #   Response if can't connect to External IPAM server
+    #     {"error": "Unable to connect to External IPAM server"}
     post '/subnet/:address/:prefix/:ip' do
       content_type :json
 
@@ -257,34 +274,37 @@ module Proxy::Netbox
       validate_ip_in_cidr!(ip, cidr)
 
       begin
-        section_name = params[:group]
-
         subnet = provider.get_subnet(cidr)
         check_subnet_exists!(subnet)
 
-        add_ip = provider.add_ip_to_subnet(ip, subnet['data']['id'], 'Address auto added by Foreman')
-        halt 500, add_ip.to_json if add_ip
+        add_ip = provider.add_ip_to_subnet(ip, params[:prefix], 'Address auto added by Foreman')
+        halt 500, add_ip.to_json unless add_ip.nil?
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET
         logger.debug(errors[:no_connection])
         raise
       end
 
-      status 201
-      {ip: ip}.to_json
+      return Net::HTTPCreated.new('HTTP/1.1', 201, 'Created').to_json
     end
 
-    # Deletes IP address from a given subnet
+    # Deletes an IP address from a given subnet in External IPAM.
     #
-    # Params: 1. address:   The network address of the IPv4 or IPv6 subnet.
-    #         2. prefix:    The subnet prefix(e.g. 24)
-    #         3. ip:        IP address to be deleted
+    # Inputs: 1. ip:               IP address to be freed up
+    #         2. subnet:           The IPv4 or IPv6 subnet CIDR. (Examples: IPv4 - "100.10.10.0/24",
+    #                              IPv6 - "2001:db8:abcd:12::/124")
+    #         3. group(optional):  The name of the External IPAM group containing the subnet.
     #
-    # Returns: JSON object
-    # Example:
+    # Returns: true if IP is deleted successfully from External IPAM, otherwise false.
+    #
+    # Proxy responses:
     #   Response if success:
-    #     HTTP 204 No Content
-    #   Response if :error =>
-    #     {"code": 404, "success": 0, "message": "Address does not exist", "time": 0.008}
+    #     Net::HTTPOK
+    #   Response if subnet error:
+    #     {"error": "The specified subnet does not exist in External IPAM."}
+    #   Response if IP already deleted:
+    #     {"error": "No addresses found"}
+    #   Response if can't connect to External IPAM server
+    #     {"error": "Unable to connect to External IPAM server"}
     delete '/subnet/:address/:prefix/:ip' do
       content_type :json
 
@@ -294,50 +314,33 @@ module Proxy::Netbox
       validate_ip_in_cidr!(ip, cidr)
 
       begin
-        section_name = params[:group]
-
-        subnet = provider.get_subnet(cidr, section_name)
+        subnet = provider.get_subnet(cidr)
         check_subnet_exists!(subnet)
 
-        delete_ip = provider.delete_ip_from_subnet(ip, subnet['data']['id'])
-        halt 500, delete_ip.to_json if delete_ip
+        delete_ip = provider.delete_ip_from_subnet(ip)
+        halt 500, delete_ip.to_json unless delete_ip.nil?
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET
         logger.debug(errors[:no_connection])
         raise
       end
-
-      status 204
-      nil
+      return Net::HTTPOK.new('HTTP/1.1', 200, 'OK').to_json
     end
 
-    # Checks whether a subnet exists in a specific section.
+    # Gets a subnet from a specific External IPAM group.
     #
-    # Params: 1. address:   The network address of the IPv4 or IPv6 subnet.
-    #         2. prefix:    The subnet prefix(e.g. 24)
-    #         3. group:     The name of the section
+    # Inputs: 1. subnet: The IPv4 or IPv6 subnet CIDR. (Examples: IPv4 - "100.10.10.0/24", IPv6 - "2001:db8:abcd:12::/124")
+    #         2. group: The name of the External IPAM group containing the subnet.
     #
-    # Returns: JSON object with 'data' field is exists, otherwise field with 'error'
+    # Returns: A subnet with a "data" key, or a hash with a "message" key containing error.
     #
-    # Example:
+    # Proxy responses:
     #   Response if exists:
-    #     {"code":200,"success":true,"data":{"id":"147","subnet":"172.55.55.0","mask":"29","sectionId":"84","description":null,"linked_subnet":null,"firewallAddressObject":null,"vrfId":"0","masterSubnetId":"0","allowRequests":"0","vlanId":"0","showName":"0","device":"0","permissions":"[]","pingSubnet":"0","discoverSubnet":"0","resolveDNS":"0","DNSrecursive":"0","DNSrecords":"0","nameserverId":"0","scanAgent":"0","customer_id":null,"isFolder":"0","isFull":"0","tag":"2","threshold":"0","location":"0","editDate":null,"lastScan":null,"lastDiscovery":null,"calculation":{"Type":"IPv4","IP address":"\/","Network":"172.55.55.0","Broadcast":"172.55.55.7","Subnet bitmask":"29","Subnet netmask":"255.255.255.248","Subnet wildcard":"0.0.0.7","Min host IP":"172.55.55.1","Max host IP":"172.55.55.6","Number of hosts":"6","Subnet Class":false}},"time":0.009}
+    #     {"data": {"subnet":"172.55.55.0", "mask":"24", "description":"My subnet"}
     #   Response if not exists:
-    #     {"code":404,"error":"No subnet 172.66.66.0/29 found in section :group"}
+    #     {"error": "No subnet 172.55.66.0/29 found in section '<:group>'"}
     get '/group/:group/subnet/:address/:prefix' do
       content_type :json
-
-      validate_required_params!([:address, :prefix, :group], params)
-      cidr = validate_cidr!(params[:address], params[:prefix])
-
-      subnet = begin
-                 provider.get_subnet_by_section(cidr, params[:group])
-               rescue Errno::ECONNREFUSED, Errno::ECONNRESET
-                 logger.debug(errors[:no_connection])
-                 raise
-               end
-
-      status 404 unless subnet
-      subnet.to_json
+      return {:error => "Groups are not supported"}.to_json
     end
   end
 end

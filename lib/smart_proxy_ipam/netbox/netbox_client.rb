@@ -67,26 +67,29 @@ module Proxy::Netbox
       end
     end
 
-    def add_ip_to_subnet(ip, subnet_id, desc)
-      data = {:subnetId => subnet_id, :ip => ip, :description => desc}
-      response = post('addresses/', data)
-      json_body = JSON.parse(response.body)
-      return nil if add_ip['message'] && add_ip['message'] == "Address created"
+    def add_ip_to_subnet(address, prefix, desc)
+      data = {:address => "#{address}/#{prefix}", :nat_outside => 0, :description => desc}.to_json
+      response = post('ipam/ip-addresses/', data)
 
-      filter_hash(json_body, [:error, :message])
+      return nil if response.code.to_s == "201"
+      return {:error => "Unable to connect to External IPAM server"}
     end
 
-    def delete_ip_from_subnet(ip, subnet_id)
-      response = delete("addresses/#{ip}/#{subnet_id}/")
+    def delete_ip_from_subnet(ip)
+      response = get("ipam/ip-addresses/?address=#{ip}")
       json_body = JSON.parse(response.body)
-      return nil if delete_ip['message'] && delete_ip['message'] == "Address deleted"
 
-      filter_hash(json_body, [:error, :message])
+      if json_body['count'] == 0
+        return {:error => "No addresses found"}
+      else
+        address_id = json_body['results'][0]['id']
+        response = delete("ipam/ip-addresses/#{address_id}/")
+        return nil if response.code.to_s == "204"
+        return {:error => "Unable to delete #{ip} in External IPAM server"}
+      end
     end
 
     def get_next_ip(subnet_id, mac, section_name, cidr)
-
-
       response = get("ipam/prefixes/#{subnet_id}/available-ips/?limit=1")
       json_body = JSON.parse(response.body)
       section = section_name.nil? ? "" : section_name
@@ -258,13 +261,12 @@ module Proxy::Netbox
       response = Net::HTTP.start(uri.hostname, uri.port, :use_ssl => uri.scheme == 'https') do |http|
         http.request(request)
       end
-      raise "Netbox HTTP Error #{response.code}" unless response.code == "200"
+      raise "Netbox HTTP Error #{response.code}" unless response.code.to_s == "200"
       response
     end
 
-    def delete(path, body = nil)
+    def delete(path)
       uri = URI(@api_base + path)
-      uri.query = URI.encode_www_form(body) if body
       logger.debug("netbox delete " + uri.to_s )
       request = Net::HTTP::Delete.new(uri)
       request['Authorization'] = 'Token ' + @conf[:token]
@@ -273,15 +275,15 @@ module Proxy::Netbox
       response = Net::HTTP.start(uri.hostname, uri.port, :use_ssl => uri.scheme == 'https') do |http|
         http.request(request)
       end
-      raise "Netbox HTTP Error #{response.code}" unless response.code == "200"
+      raise "Netbox HTTP Error #{response.code}" unless response.code.to_s == "204"
       response
     end
 
-    def post(path, body = nil)
+    def post(path, body)
+    logger.debug("netbox post " + path + " " + body.to_s )
       uri = URI(@api_base + path)
-      uri.query = URI.encode_www_form(body) if body
-      logger.debug("netbox post " + query.to_s )
       request = Net::HTTP::Post.new(uri)
+      request.body = body
       request['Authorization'] = 'Token ' + @conf[:token]
       request['Accept'] = 'application/json'
       request['Content-Type'] = 'application/json'
@@ -289,7 +291,7 @@ module Proxy::Netbox
       response = Net::HTTP.start(uri.hostname, uri.port, :use_ssl => uri.scheme == 'https') do |http|
         http.request(request)
       end
-      raise "Netbox HTTP Error #{response.code}" unless response.code == "200"
+      raise "Netbox HTTP Error #{response.code}" unless response.code.to_s == "201"
       response
     end
   end

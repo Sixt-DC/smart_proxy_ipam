@@ -17,7 +17,8 @@ module NetboxHelper
 
   def validate_cidr!(address, prefix)
     cidr = "#{address}/#{prefix}"
-    if IPAddr.new(cidr).to_s != IPAddr.new(address).to_s
+    network = IPAddr.new(cidr).to_s
+    if network != IPAddr.new(address).to_s
       halt 400, {error: "Network address #{address} should be #{network} with prefix #{prefix}"}.to_json
     end
     cidr
@@ -49,7 +50,7 @@ module NetboxHelper
   end
 
   # Returns a hash with only the fields given in the fields param
-  def filter_hash(hash, fields)
+  def a(hash, fields)
     new_hash = {}
     fields.each do |field|
       new_hash[field.to_sym] = hash[field.to_s] if hash[field.to_s]
