@@ -5,6 +5,7 @@ require 'monitor'
 require 'concurrent'
 require 'time'
 require 'uri'
+require 'sinatra'
 require 'smart_proxy_ipam/ipam'
 require 'smart_proxy_ipam/ipam_main'
 require 'smart_proxy_ipam/netbox/netbox_helper'
@@ -15,7 +16,7 @@ module Proxy::Netbox
     include NetboxHelper
 
     MAX_RETRIES = 5
-    DEFAULT_CLEANUP_INTERVAL = 60  # 2 mins
+    DEFAULT_CLEANUP_INTERVAL = 60 # 2 mins
     @@ip_cache = nil
     @@timer_task = nil
 
@@ -34,7 +35,7 @@ module Proxy::Netbox
 
       subnet = {}
       if json_body['count'] == 0
-        subnet['error']='No subnets found'
+        subnet['error'] = 'No subnets found'
       else
         subnet['data'] = {}
         subnet['data']['subnet'] = json_body['results'][0]['prefix'].split('/').first
@@ -46,47 +47,32 @@ module Proxy::Netbox
       subnet
     end
 
-    def get_subnets(section_id, include_id = true)
-      fields = [:subnet, :mask, :description]
-      fields << :id if include_id
-
-      response = get("sections/#{section_id}/subnets/")
-      json_body = JSON.parse(response.body)
-      json_body['data'] = filter_fields(json_body, fields) if json_body['data']
-      filter_hash(json_body, [:data, :error, :message])
-    end
-
     def ip_exists?(ip, subnet_id)
       response = get("ipam/ip-addresses/?address=#{ip}")
       json_body = JSON.parse(response.body)
 
-      if json_body['count'] == 0
-        return false
-      else
-        return true
-      end
+      return false if json_body['count'] == 0
+      true
     end
 
     def add_ip_to_subnet(address, prefix, desc)
-      data = {:address => "#{address}/#{prefix}", :nat_outside => 0, :description => desc}.to_json
+      data = { :address => "#{address}/#{prefix}", :nat_outside => 0, :description => desc }.to_json
       response = post('ipam/ip-addresses/', data)
 
       return nil if response.code.to_s == "201"
-      return {:error => "Unable to connect to External IPAM server"}
+      { :error => "Unable to connect to External IPAM server" }
     end
 
     def delete_ip_from_subnet(ip)
       response = get("ipam/ip-addresses/?address=#{ip}")
       json_body = JSON.parse(response.body)
 
-      if json_body['count'] == 0
-        return {:error => "No addresses found"}
-      else
-        address_id = json_body['results'][0]['id']
-        response = delete("ipam/ip-addresses/#{address_id}/")
-        return nil if response.code.to_s == "204"
-        return {:error => "Unable to delete #{ip} in External IPAM server"}
-      end
+      return { :error => "No addresses found" } if json_body['count'] == 0
+
+      address_id = json_body['results'][0]['id']
+      response = delete("ipam/ip-addresses/#{address_id}/")
+      return nil if response.code.to_s == "204"
+      { :error => "Unable to delete #{ip} in External IPAM server" }
     end
 
     def get_next_ip(subnet_id, mac, section_name, cidr)
@@ -96,10 +82,10 @@ module Proxy::Netbox
       @@ip_cache[section.to_sym] = {} if @@ip_cache[section.to_sym].nil?
       subnet_hash = @@ip_cache[section.to_sym][cidr.to_sym]
 
-      return {:error => 'No subnets found'} if json_body.empty?
+      return { :error => 'No subnets found' } if json_body.empty?
 
       json_return = {}
-      if subnet_hash && subnet_hash.key?(mac.to_sym)
+      if subnet_hash&.key?(mac.to_sym)
         json_return['data'] = @@ip_cache[section_name.to_sym][cidr.to_sym][mac.to_sym][:ip]
       else
         next_ip = nil
@@ -113,18 +99,18 @@ module Proxy::Netbox
           next_ip = find_new_ip(subnet_id, new_ip, mac, cidr, section)
         end
 
-        return {:error => "Unable to find another available IP address in subnet #{cidr}"} if next_ip.nil?
-        return {:error => "It is possible that there are no more free addresses in subnet #{cidr}. Available IP's may be cached, and could become available after in-memory IP cache is cleared(up to #{DEFAULT_CLEANUP_INTERVAL} seconds)."} unless usable_ip(next_ip, cidr)
+        return { :error => "Unable to find another available IP address in subnet #{cidr}" } if next_ip.nil?
+        return { :error => "It is possible that there are no more free addresses in subnet #{cidr}. Available IP's may be cached, and could become available after in-memory IP cache is cleared(up to #{DEFAULT_CLEANUP_INTERVAL} seconds)." } unless usable_ip(next_ip, cidr)
 
         json_return['data'] = next_ip
       end
 
       # TODO: Is there a better way to catch this?
       if json_return['error'] && json_return['error'].downcase == "no free addresses found"
-        return {:error => json_body['error']}
+        return { :error => json_body['error'] }
       end
 
-      {:data => json_return['data']}
+      { :data => json_return['data'] }
     end
 
     def start_cleanup_task
@@ -167,7 +153,7 @@ module Proxy::Netbox
     # }
     def init_cache
       @@m.synchronize do
-        if @@ip_cache and not @@ip_cache.empty?
+        if @@ip_cache && !@@ip_cache.empty?
           logger.debug("Processing ip cache.")
           @@ip_cache.each do |section, subnets|
             subnets.each do |cidr, macs|
@@ -176,12 +162,12 @@ module Proxy::Netbox
                   @@ip_cache[section][cidr].delete(mac)
                 end
               end
-              @@ip_cache[section].delete(cidr) if @@ip_cache[section][cidr].nil? or @@ip_cache[section][cidr].empty?
+              @@ip_cache[section].delete(cidr) if @@ip_cache[section][cidr].nil? || @@ip_cache[section][cidr].empty?
             end
           end
         else
           logger.debug("Clearing ip cache.")
-          @@ip_cache = {:"" => {}}
+          @@ip_cache = { :"" => {} }
         end
       end
     end
@@ -195,16 +181,16 @@ module Proxy::Netbox
         section_hash = @@ip_cache[section_name.to_sym]
 
         section_hash.each do |key, values|
-          if values.keys.include? mac_addr.to_sym
+          if values.keys? mac_addr.to_sym
             @@ip_cache[section_name.to_sym][key].delete(mac_addr.to_sym)
           end
-          @@ip_cache[section_name.to_sym].delete(key) if @@ip_cache[section_name.to_sym][key].nil? or @@ip_cache[section_name.to_sym][key].empty?
+          @@ip_cache[section_name.to_sym].delete(key) if @@ip_cache[section_name.to_sym][key].nil? || @@ip_cache[section_name.to_sym][key].empty?
         end
 
         if section_hash.key?(cidr.to_sym)
-          @@ip_cache[section_name.to_sym][cidr.to_sym][mac_addr.to_sym] = {:ip => ip.to_s, :timestamp => Time.now.to_s}
+          @@ip_cache[section_name.to_sym][cidr.to_sym][mac_addr.to_sym] = { :ip => ip.to_s, :timestamp => Time.now.to_s }
         else
-          @@ip_cache = @@ip_cache.merge({section_name.to_sym => {cidr.to_sym => {mac_addr.to_sym => {:ip => ip.to_s, :timestamp => Time.now.to_s}}}})
+          @@ip_cache = @@ip_cache.merge({ section_name.to_sym => { cidr.to_sym => { mac_addr.to_sym => { :ip => ip.to_s, :timestamp => Time.now.to_s } } } })
         end
       end
     end
@@ -253,34 +239,54 @@ module Proxy::Netbox
 
     def get(path)
       uri = URI(@api_base + path)
-      logger.debug("netbox get " + uri.to_s )
+      logger.debug("netbox get " + uri.to_s)
       request = Net::HTTP::Get.new(uri)
       request['Authorization'] = 'Token ' + @conf[:token]
       request['Accept'] = 'application/json'
 
-      response = Net::HTTP.start(uri.hostname, uri.port, :use_ssl => uri.scheme == 'https') do |http|
-        http.request(request)
+      begin
+        response = Net::HTTP.start(uri.hostname, uri.port, :use_ssl => uri.scheme == 'https') do |http|
+          http.request(request)
+        end
+
+        if response.code.to_s != "200"
+          logger.warn("Netbox HTTP Error: #{e.message}")
+          raise("Netbox HTTP Error: #{response.code}")
+        end
+
+        response
+      rescue Errno::ECONNREFUSED, Errno::ECONNRESET => e
+        logger.warn("Netbox HTTP Error: #{e.message}")
+        raise("Netbox HTTP Error: #{response.code}")
       end
-      raise "Netbox HTTP Error #{response.code}" unless response.code.to_s == "200"
-      response
     end
 
     def delete(path)
       uri = URI(@api_base + path)
-      logger.debug("netbox delete " + uri.to_s )
+      logger.debug("netbox delete " + uri.to_s)
       request = Net::HTTP::Delete.new(uri)
       request['Authorization'] = 'Token ' + @conf[:token]
       request['Accept'] = 'application/json'
 
-      response = Net::HTTP.start(uri.hostname, uri.port, :use_ssl => uri.scheme == 'https') do |http|
-        http.request(request)
+      begin
+        response = Net::HTTP.start(uri.hostname, uri.port, :use_ssl => uri.scheme == 'https') do |http|
+          http.request(request)
+        end
+
+        if response.code.to_s != "204"
+          logger.warn("Netbox HTTP Error: #{e.message}")
+          raise("Netbox HTTP Error: #{response.code}")
+        end
+
+        response
+      rescue Errno::ECONNREFUSED, Errno::ECONNRESET => e
+        logger.warn("Netbox HTTP Error: #{e.message}")
+        raise("Netbox HTTP Error: #{response.code}")
       end
-      raise "Netbox HTTP Error #{response.code}" unless response.code.to_s == "204"
-      response
     end
 
     def post(path, body)
-    logger.debug("netbox post " + path + " " + body.to_s )
+      logger.debug("netbox post " + path + " " + body.to_s)
       uri = URI(@api_base + path)
       request = Net::HTTP::Post.new(uri)
       request.body = body
@@ -288,11 +294,19 @@ module Proxy::Netbox
       request['Accept'] = 'application/json'
       request['Content-Type'] = 'application/json'
 
-      response = Net::HTTP.start(uri.hostname, uri.port, :use_ssl => uri.scheme == 'https') do |http|
-        http.request(request)
+      begin
+        response = Net::HTTP.start(uri.hostname, uri.port, :use_ssl => uri.scheme == 'https') do |http|
+          http.request(request)
+        end
+        if response.code.to_s != "201"
+          logger.warn("Netbox HTTP Error: #{e.message}")
+          raise("Netbox HTTP Error: #{response.code}")
+        end
+        response
+      rescue Errno::ECONNREFUSED, Errno::ECONNRESET => e
+        logger.warn("Netbox HTTP Error: #{e.message}")
+        raise("Netbox HTTP Error: #{response.code}")
       end
-      raise "Netbox HTTP Error #{response.code}" unless response.code.to_s == "201"
-      response
     end
   end
 end

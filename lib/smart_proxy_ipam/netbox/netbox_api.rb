@@ -4,17 +4,14 @@ require 'smart_proxy_ipam/ipam_main'
 require 'smart_proxy_ipam/netbox/netbox_client'
 require 'smart_proxy_ipam/netbox/netbox_helper'
 
-# TODO: Refactor later to handle multiple IPAM providers. For now, it is
-# just NetBox that is supported
 module Proxy::Netbox
   class Api < ::Sinatra::Base
     include ::Proxy::Log
-    helpers ::Proxy::Helpers
     helpers NetboxHelper
 
     def provider
       @provider ||= begin
-                     NetboxClient.new
+                      NetboxClient.new
                     end
     end
 
@@ -34,20 +31,19 @@ module Proxy::Netbox
       validate_required_params!([:address, :prefix, :mac], params)
       cidr = validate_cidr!(params[:address], params[:prefix])
 
-      begin
-        mac = params[:mac]
-        group = params[:group]
+      mac = params[:mac]
+      group = params[:group]
 
+      begin
         subnet = provider.get_subnet(cidr)
         check_subnet_exists!(subnet)
 
         provider.get_next_ip(subnet['data']['id'], mac, group, cidr).to_json
-      rescue Errno::ECONNREFUSED, Errno::ECONNRESET
-        logger.debug(errors[:no_connection])
-        raise
+      rescue RuntimeError => e
+        logger.warn(e.message)
+        halt 500, { error: e.message }.to_json
       end
     end
-
 
     # Returns an array of subnets from External IPAM matching the given subnet.
     #
@@ -70,12 +66,12 @@ module Proxy::Netbox
       validate_required_params!([:address, :prefix], params)
       cidr = validate_cidr!(params[:address], params[:prefix])
 
-      subnet = begin
-                 provider.get_subnet(cidr)
-               rescue Errno::ECONNREFUSED, Errno::ECONNRESET
-                 logger.debug(errors[:no_connection])
-                 raise
-               end
+      begin
+        subnet = provider.get_subnet(cidr)
+      rescue RuntimeError => e
+        logger.warn(e.message)
+        halt 500, { error: e.message }.to_json
+      end
 
       status 404 unless subnet
       subnet.to_json
@@ -103,7 +99,7 @@ module Proxy::Netbox
     #     {"error": "Unable to connect to External IPAM server"}
     get '/groups' do
       content_type :json
-      return {:error => "Groups are not supported"}.to_json
+      return { :error => "Groups are not supported" }.to_json
     end
 
     # Get a group from External IPAM. A group is analagous to a 'section' in phpIPAM, and
@@ -124,78 +120,29 @@ module Proxy::Netbox
     #     {"error": "Unable to connect to External IPAM server"}
     get '/groups/:group' do
       content_type :json
-      return {:error => "Groups are not supported"}.to_json
+      return { :error => "Groups are not supported" }.to_json
     end
 
-    # Get a list of subnets for given external ipam section/group
+    # Get a list of subnets for the given External IPAM group.
     #
-    # Input: section_name(string). The name of the external ipam section/group
-    # Returns: Array of subnets(as json) in "data" key on success, hash with error otherwise
-    # Examples:
-    #   Response if success:
-    #     {
-    #       "code":200,
-    #       "success":true,
-    #       "data":[
-    #         {
-    #             "id":"24",
-    #             "subnet":"100.10.10.0",
-    #             "mask":"24",
-    #             "sectionId":"10",
-    #             "description":"wrgwgwefwefw",
-    #             "linked_subnet":null,
-    #             "firewallAddressObject":null,
-    #             "vrfId":"0",
-    #             "masterSubnetId":"0",
-    #             "allowRequests":"0",
-    #             "vlanId":"0",
-    #             "showName":"0",
-    #             "device":"0",
-    #             "permissions":"[]",
-    #             "pingSubnet":"0",
-    #             "discoverSubnet":"0",
-    #             "DNSrecursive":"0",
-    #             "DNSrecords":"0",
-    #             "nameserverId":"0",
-    #             "scanAgent":"0",
-    #             "isFolder":"0",
-    #             "isFull":"0",
-    #             "tag":"2",
-    #             "threshold":"0",
-    #             "location":"0",
-    #             "editDate":null,
-    #             "lastScan":null,
-    #             "lastDiscovery":null,
-    #             "usage":{
-    #               "used":"0",
-    #               "maxhosts":"254",
-    #               "freehosts":"254",
-    #               "freehosts_percent":100,
-    #               "Offline_percent":0,
-    #               "Used_percent":0,
-    #               "Reserved_percent":0,
-    #               "DHCP_percent":0
-    #             }
-    #         }
-    #       ],
-    #       "time":0.012
-    #     }
-    #   Response if :error =>
-    #     {"error":"Unable to connect to External IPAM server"}
+    # Params:  1. group:  The name of the External IPAM group containing the subnet.
+    #
+    # Returns: An array of subnets on success, or a hash with an "error" key on failure.
+    #
+    # Responses from Proxy plugin:
+    #   Response if success: {"data": [
+    #     {subnet":"100.10.10.0","mask":"24","description":"Test Subnet 1"},
+    #     {subnet":"100.20.20.0","mask":"24","description":"Test Subnet 2"}
+    #   ]}
+    #   Response if no subnets exist in section.
+    #     {"data": []}
+    #   Response if section not found:
+    #     {"error": "Group not found in External IPAM"}
+    #   Response if can't connect to External IPAM server
+    #     {"error": "Unable to connect to External IPAM"}
     get '/groups/:group/subnets' do
       content_type :json
-
-      validate_required_params!([:group], params)
-
-      begin
-        section = provider.get_section(params[:group])
-        halt 404, {:error => errors[:no_section]}.to_json unless section
-
-        provider.get_subnets(section['id'].to_s).to_json
-      rescue Errno::ECONNREFUSED, Errno::ECONNRESET
-        logger.debug(errors[:no_connection])
-        raise
-      end
+      return { :error => "Groups are not supported" }.to_json
     end
 
     # Checks whether an IP address has already been reserved in External IPAM.
@@ -228,19 +175,15 @@ module Proxy::Netbox
 
       begin
         subnet = provider.get_subnet(cidr)
-        check_subnet_exists!(subnet)
-
-
-        if provider.ip_exists?(ip, subnet['data']['id'])
-          return Net::HTTPFound.new('HTTP/1.1', 200, 'Found').to_json
-        else
-          return Net::HTTPNotFound.new('HTTP/1.1', 404, 'Not Found').to_json
-        end
-      rescue Errno::ECONNREFUSED, Errno::ECONNRESET
-        logger.debug(errors[:no_connection])
-        raise
+      rescue RuntimeError => e
+        logger.warn(e.message)
+        halt 500, { error: e.message }.to_json
       end
 
+      check_subnet_exists!(subnet)
+
+      return Net::HTTPFound.new('HTTP/1.1', 200, 'Found').to_json if provider.ip_exists?(ip, subnet['data']['id'])
+      return Net::HTTPNotFound.new('HTTP/1.1', 404, 'Not Found').to_json
     end
 
     # Adds an IP address to the specified subnet in External IPAM. This will reserve the IP in the
@@ -279,9 +222,9 @@ module Proxy::Netbox
 
         add_ip = provider.add_ip_to_subnet(ip, params[:prefix], 'Address auto added by Foreman')
         halt 500, add_ip.to_json unless add_ip.nil?
-      rescue Errno::ECONNREFUSED, Errno::ECONNRESET
-        logger.debug(errors[:no_connection])
-        raise
+      rescue RuntimeError => e
+        logger.warn(e.message)
+        halt 500, { error: e.message }.to_json
       end
 
       return Net::HTTPCreated.new('HTTP/1.1', 201, 'Created').to_json
@@ -319,10 +262,11 @@ module Proxy::Netbox
 
         delete_ip = provider.delete_ip_from_subnet(ip)
         halt 500, delete_ip.to_json unless delete_ip.nil?
-      rescue Errno::ECONNREFUSED, Errno::ECONNRESET
-        logger.debug(errors[:no_connection])
-        raise
+      rescue RuntimeError => e
+        logger.warn(e.message)
+        halt 500, { error: e.message }.to_json
       end
+
       return Net::HTTPOK.new('HTTP/1.1', 200, 'OK').to_json
     end
 
@@ -340,7 +284,7 @@ module Proxy::Netbox
     #     {"error": "No subnet 172.55.66.0/29 found in section '<:group>'"}
     get '/group/:group/subnet/:address/:prefix' do
       content_type :json
-      return {:error => "Groups are not supported"}.to_json
+      return { :error => "Groups are not supported" }.to_json
     end
   end
 end
