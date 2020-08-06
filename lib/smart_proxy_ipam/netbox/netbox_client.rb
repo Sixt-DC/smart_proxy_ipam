@@ -250,14 +250,14 @@ module Proxy::Netbox
         end
 
         if response.code.to_s != "200"
-          logger.warn("Netbox HTTP Error: #{e.message}")
+          logger.warn("Netbox HTTP Error: #{response.code}")
           raise("Netbox HTTP Error: #{response.code}")
         end
 
         response
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET => e
         logger.warn("Netbox HTTP Error: #{e.message}")
-        raise("Netbox HTTP Error: #{response.code}")
+        raise("Netbox HTTP Error: #{e.message}")
       end
     end
 
@@ -274,14 +274,14 @@ module Proxy::Netbox
         end
 
         if response.code.to_s != "204"
-          logger.warn("Netbox HTTP Error: #{e.message}")
+          logger.warn("Netbox HTTP Error: #{response.code}")
           raise("Netbox HTTP Error: #{response.code}")
         end
 
         response
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET => e
         logger.warn("Netbox HTTP Error: #{e.message}")
-        raise("Netbox HTTP Error: #{response.code}")
+        raise("Netbox HTTP Error: #{e.message}")
       end
     end
 
@@ -299,13 +299,13 @@ module Proxy::Netbox
           http.request(request)
         end
         if response.code.to_s != "201"
-          logger.warn("Netbox HTTP Error: #{e.message}")
+          logger.warn("Netbox HTTP Error: #{response.code}")
           raise("Netbox HTTP Error: #{response.code}")
         end
         response
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET => e
         logger.warn("Netbox HTTP Error: #{e.message}")
-        raise("Netbox HTTP Error: #{response.code}")
+        raise("Netbox HTTP Error: #{e.message}")
       end
     end
   end
